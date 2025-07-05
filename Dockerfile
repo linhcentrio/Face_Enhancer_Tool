@@ -1,53 +1,122 @@
-# Base image with CUDA support
-FROM nvidia/cuda:12.1-runtime-ubuntu22.04
+# GFPGAN Face Enhancer Serverless
+# CUDA 12.1 Optimized
+FROM spxiong/pytorch:2.5.1-py3.10.15-cuda12.1.0-devel-ubuntu22.04
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && \
-    apt-get install -y python3 python3-pip python3-dev build-essential \
-    libgl1-mesa-glx libglib2.0-0 ffmpeg wget curl && \
-    rm -rf /var/lib/apt/lists/*
+# Set optimized CUDA environment for 12.1
+ENV CUDA_VISIBLE_DEVICES=0
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV CUDA_MODULE_LOADING=LAZY
 
-# Install Python dependencies
-RUN pip3 install --no-cache-dir \
-    onnxruntime-gpu==1.17.1 \
-    opencv-python==4.8.0.76 \
+# Suppress RunPod logs
+ENV RUNPOD_DEBUG=false
+ENV RUNPOD_LOG_LEVEL=ERROR
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.10-dev \
+    build-essential \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libsndfile1 \
+    ffmpeg \
+    wget \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies with CUDA 12.1 optimized ONNX Runtime
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip setuptools wheel && \
+    echo "=== Installing core dependencies (CUDA 12.1 optimized) ===" && \
+    pip install --no-cache-dir \
     numpy==1.24.4 \
+    opencv-python==4.8.0.76 && \
+    echo "=== Installing ONNX Runtime GPU 1.17.1 (CUDA 12.1 support) ===" && \
+    pip install --no-cache-dir onnxruntime-gpu==1.17.1 && \
+    echo "=== Installing other dependencies ===" && \
+    pip install --no-cache-dir \
     tqdm==4.67.1 \
     requests==2.28.1 \
-    scikit-image==0.22.0 \
-    Pillow==10.0.0 \
-    scipy==1.11.4 \
+    scikit-image==0.25.2 \
+    Pillow==11.0.0 \
+    matplotlib==3.10.1 \
+    scipy==1.15.2 \
     imutils==0.5.4 \
-    librosa==0.10.1 \
-    numba==0.58.1 \
-    runpod
+    imageio==2.37.0 \
+    librosa==0.11.0 \
+    numba==0.61.0 \
+    soundfile==0.13.1 \
+    easydict==1.13 \
+    cython==3.0.12 \
+    runpod>=1.6.0 \
+    minio>=7.0.0
 
-# Create required directories
-RUN mkdir -p /app/enhancers/GFPGAN /app/faceID /app/outputs /app/temp
+# Install InsightFace with fallback
+RUN --mount=type=cache,target=/root/.cache/pip \
+    echo "=== Installing InsightFace ===" && \
+    pip install --no-cache-dir insightface==0.7.3 || \
+    (wget --no-check-certificate --timeout=30 --tries=3 \
+    "https://huggingface.co/deauxpas/colabrepo/resolve/main/insightface-0.7.3-cp310-cp310-linux_x86_64.whl" \
+    -O /tmp/insightface.whl && \
+    pip install /tmp/insightface.whl --force-reinstall && \
+    rm -f /tmp/insightface.whl)
 
-# Download necessary ONNX model files
-RUN wget --no-check-certificate --timeout=120 --tries=3 \
+# Copy source code
+COPY . /app/
+
+# Create directories and download models
+RUN mkdir -p /app/enhancers/GFPGAN /app/utils /app/faceID /app/outputs /app/temp && \
+    echo "=== Downloading Face Enhancer models ===" && \
+    wget --no-check-certificate --timeout=120 --tries=3 \
     "https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.onnx" \
     -O /app/enhancers/GFPGAN/GFPGANv1.4.onnx && \
+    wget --no-check-certificate --timeout=120 --tries=3 \
+    "https://huggingface.co/OwlMaster/AllFilesRope/resolve/main/scrfd_2.5g_bnkps.onnx" \
+    -O /app/utils/scrfd_2.5g_bnkps.onnx && \
     wget --no-check-certificate --timeout=120 --tries=3 \
     "https://huggingface.co/manh-linh/faceID_recognition/resolve/main/recognition.onnx" \
     -O /app/faceID/recognition.onnx && \
     wget --no-check-certificate --timeout=120 --tries=3 \
     "https://huggingface.co/facefusion/models-3.0.0/resolve/main/arcface_w600k_r50.onnx" \
-    -O /app/faceID/arcface_w600k_r50.onnx
+    -O /app/faceID/arcface_w600k_r50.onnx && \
+    echo "✅ All Face Enhancer models downloaded"
 
-# Copy all application files
-COPY . /app/
+# Verify CUDA 12.1 + ONNX Runtime 1.17.1 compatibility
+RUN echo "=== Verifying CUDA 12.1 + ONNX Runtime 1.17.1 compatibility ===" && \
+    python -c "import torch; print(f'✅ PyTorch: {torch.__version__}')" && \
+    python -c "import torch; print(f'✅ CUDA Available: {torch.cuda.is_available()}')" && \
+    python -c "import torch; print(f'✅ CUDA Version: {torch.version.cuda}')" && \
+    python -c "import onnxruntime; print(f'✅ ONNX Runtime: {onnxruntime.__version__}')" && \
+    python -c "import onnxruntime; print(f'✅ CUDA Provider: {\"CUDAExecutionProvider\" in onnxruntime.get_available_providers()}')" && \
+    python -c "import onnxruntime; providers = onnxruntime.get_available_providers(); print(f'✅ Available Providers: {providers}')" && \
+    echo "🚀 CUDA 12.1 + ONNX Runtime 1.17.1 verified successfully"
 
-# Set environment variables
+# Verify Face Enhancer models
+RUN echo "=== Verifying Face Enhancer models ===" && \
+    ls -la /app/enhancers/GFPGAN/ && \
+    ls -la /app/faceID/ && \
+    ls -la /app/utils/ && \
+    python -c "import os; print('✅ GFPGAN model:', os.path.exists('/app/enhancers/GFPGAN/GFPGANv1.4.onnx'))" && \
+    python -c "import os; print('✅ FaceID model:', os.path.exists('/app/faceID/arcface_w600k_r50.onnx'))" && \
+    python -c "import os; print('✅ Recognition model:', os.path.exists('/app/faceID/recognition.onnx'))" && \
+    echo "🎯 Face Enhancer models verified"
+
+# Set environment
 ENV PYTHONPATH="/app"
-ENV PYTHONUNBUFFERED=1
 
-# Expose port for RunPod
-EXPOSE 8000
+# Make scripts executable
+RUN chmod +x /app/*.py
 
-# Command to run the handler
-CMD ["python3", "rp_handler.py"]
+# Health check
+HEALTHCHECK --interval=60s --timeout=30s --start-period=10s --retries=3 \
+    CMD python -c "import onnxruntime; print('Health check OK')" || exit 1
+
+CMD ["python", "rp_handler.py"]
