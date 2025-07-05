@@ -1,5 +1,5 @@
 # Base image with CUDA support
-FROM spxiong/pytorch:2.5.1-py3.10.15-cuda12.1.0-devel-ubuntu22.04
+FROM nvidia/cuda:12.1-runtime-ubuntu22.04
 
 # Set working directory
 WORKDIR /app
